@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DocuMind — Local Semantic Search &amp; RAG</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; max-width: 960px; margin: 28px auto; padding: 0 16px; }
+    .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    input, select, button { padding: 8px 12px; border-radius: 6px; border: 1px solid #30363d; background: #21262d; color: #e6edf3; }
+    input[type="text"] { flex: 1; min-width: 240px; }
+    button { background: #2f81f7; border: none; cursor: pointer; font-weight: 600; }
+    .source { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>DocuMind</h1>
+  <div class="card">
+    <div class="row">
+      <select id="collection"></select>
+      <input id="doc-file" type="file" />
+      <button onclick="uploadDoc()">Index Document</button>
+    </div>
+    <div id="doc-list" style="margin-top: 10px; font-size: 0.9rem;"></div>
+  </div>
+  <div class="card">
+    <div class="row">
+      <input id="query" type="text" placeholder="Ask a question or search your local documents..." />
+      <button onclick="askRAG()">Ask (RAG)</button>
+      <button onclick="searchOnly()">Search</button>
+    </div>
+    <div id="answer" style="margin-top: 14px; white-space: pre-wrap;"></div>
+    <div id="sources"></div>
+  </div>
+  <script>
+    async function loadCollections() {
+      const data = await fetch('/api/collections').then(r => r.json());
+      const sel = document.getElementById('collection');
+      sel.innerHTML = '';
+      for (const c of data.collections) {
+        const opt = document.createElement('option');
+        opt.value = c.id; opt.textContent = c.name;
+        sel.appendChild(opt);
+      }
+      await loadDocs();
+    }
+    async function loadDocs() {
+      const cid = document.getElementById('collection').value;
+      const data = await fetch('/api/documents?collection_id=' + encodeURIComponent(cid)).then(r => r.json());
+      document.getElementById('doc-list').textContent = 'Indexed: ' + data.documents.map(d => `${d.filename} (${d.page_count}p)`).join(', ');
+    }
+    async function uploadDoc() {
+      const f = document.getElementById('doc-file').files[0];
+      if (!f) return;
+      const form = new FormData();
+      form.append('file', f);
+      form.append('collection_id', document.getElementById('collection').value);
+      await fetch('/api/documents', { method: 'POST', body: form });
+      await loadDocs();
+    }
+    async function askRAG() {
+      const q = document.getElementById('query').value;
+      const cid = document.getElementById('collection').value;
+      const res = await fetch('/api/rag', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: q, collection_id: cid, top_k: 5 })
+      }).then(r => r.json());
+      document.getElementById('answer').textContent = res.answer;
+      renderSources(res.sources);
+    }
+    async function searchOnly() {
+      const q = document.getElementById('query').value;
+      const cid = document.getElementById('collection').value;
+      const res = await fetch('/api/search', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: q, collection_id: cid, top_k: 5 })
+      }).then(r => r.json());
+      document.getElementById('answer').textContent = `Mode: ${res.mode} (${res.results.length} matches)`;
+      renderSources(res.results);
+    }
+    function renderSources(list) {
+      const box = document.getElementById('sources');
+      box.innerHTML = '';
+      for (const s of (list || [])) {
+        const div = document.createElement('div');
+        div.className = 'source';
+        div.textContent = `[${s.filename} p.${s.page_number} | score=${s.score}] ${s.content}`;
+        box.appendChild(div);
+      }
+    }
+    loadCollections();
+  </script>
+</body>
+</html>
