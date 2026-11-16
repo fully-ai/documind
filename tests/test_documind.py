@@ -113,3 +113,14 @@ def test_ollama_embeddings_and_rag(tmp_path: Path) -> None:
         assert data["used_ollama"] is True
         assert data["retrieval_mode"] == "embedding"
         assert "[Source 1]" in data["answer"]
+
+        doc_id = up.json()["id"]
+        assert tc.delete(f"/api/documents/{doc_id}").status_code == 200
+        assert tc.delete(f"/api/documents/{doc_id}").status_code == 404
+
+        bad_up = tc.post(
+            "/api/documents",
+            data={"collection_id": "default"},
+            files={"file": ("malware.bin", b"\x00\x01\x02", "application/octet-stream")},
+        )
+        assert bad_up.status_code == 400

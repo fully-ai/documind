@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0] - 2026-11-16
+
+### Added
+- Collection creation, document deletion buttons, and search history panel in the web UI.
+- Tests for document deletion and unsupported binary upload rejection.
+- Comprehensive README with Mermaid architecture diagram, API reference, and known limitations.
+
 ## [0.1.0] - 2026-11-16
 
 ### Added

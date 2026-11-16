@@ -11,14 +11,18 @@
     input, select, button { padding: 8px 12px; border-radius: 6px; border: 1px solid #30363d; background: #21262d; color: #e6edf3; }
     input[type="text"] { flex: 1; min-width: 240px; }
     button { background: #2f81f7; border: none; cursor: pointer; font-weight: 600; }
+    button.btn-ghost { background: #21262d; border: 1px solid #30363d; }
+    button.btn-danger { background: #da3633; padding: 4px 8px; font-size: 0.8rem; }
     .source { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; margin-top: 8px; }
+    .doc-pill { display: inline-flex; gap: 6px; align-items: center; background: #21262d; padding: 4px 8px; border-radius: 6px; margin: 4px 4px 0 0; }
   </style>
 </head>
 <body>
   <h1>DocuMind</h1>
   <div class="card">
     <div class="row">
-      <select id="collection"></select>
+      <select id="collection" onchange="loadDocs()"></select>
+      <button class="btn-ghost" onclick="createCollection()">+ Collection</button>
       <input id="doc-file" type="file" />
       <button onclick="uploadDoc()">Index Document</button>
     </div>
@@ -28,10 +32,14 @@
     <div class="row">
       <input id="query" type="text" placeholder="Ask a question or search your local documents..." />
       <button onclick="askRAG()">Ask (RAG)</button>
-      <button onclick="searchOnly()">Search</button>
+      <button class="btn-ghost" onclick="searchOnly()">Search</button>
     </div>
     <div id="answer" style="margin-top: 14px; white-space: pre-wrap;"></div>
     <div id="sources"></div>
+  </div>
+  <div class="card">
+    <strong>Recent Search History</strong>
+    <ul id="history-list" style="font-size:0.88rem;color:#8b949e;padding-left:18px;"></ul>
   </div>
   <script>
     async function loadCollections() {
@@ -44,11 +52,32 @@
         sel.appendChild(opt);
       }
       await loadDocs();
+      await loadHistory();
+    }
+    async function createCollection() {
+      const name = prompt('Collection name:');
+      if (!name) return;
+      await fetch('/api/collections', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, description: '' })
+      });
+      await loadCollections();
     }
     async function loadDocs() {
       const cid = document.getElementById('collection').value;
       const data = await fetch('/api/documents?collection_id=' + encodeURIComponent(cid)).then(r => r.json());
-      document.getElementById('doc-list').textContent = 'Indexed: ' + data.documents.map(d => `${d.filename} (${d.page_count}p)`).join(', ');
+      const box = document.getElementById('doc-list');
+      box.innerHTML = '';
+      for (const d of data.documents) {
+        const span = document.createElement('span');
+        span.className = 'doc-pill';
+        span.innerHTML = `${d.filename} (${d.page_count}p) <button class="btn-danger" onclick="deleteDoc('${d.id}')">×</button>`;
+        box.appendChild(span);
+      }
+    }
+    async function deleteDoc(id) {
+      await fetch(`/api/documents/${id}`, { method: 'DELETE' });
+      await loadDocs();
     }
     async function uploadDoc() {
       const f = document.getElementById('doc-file').files[0];
@@ -68,6 +97,7 @@
       }).then(r => r.json());
       document.getElementById('answer').textContent = res.answer;
       renderSources(res.sources);
+      await loadHistory();
     }
     async function searchOnly() {
       const q = document.getElementById('query').value;
@@ -78,6 +108,13 @@
       }).then(r => r.json());
       document.getElementById('answer').textContent = `Mode: ${res.mode} (${res.results.length} matches)`;
       renderSources(res.results);
+      await loadHistory();
+    }
+    async function loadHistory() {
+      const { history } = await fetch('/api/history').then(r => r.json());
+      document.getElementById('history-list').innerHTML = (history || [])
+        .slice(0, 10)
+        .map(h => `<li>[${h.mode}] ${h.query} (${h.result_count} hits)</li>`).join('');
     }
     function renderSources(list) {
       const box = document.getElementById('sources');
