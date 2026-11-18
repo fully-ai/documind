@@ -1,12 +1,13 @@
 """FastAPI backend for DocuMind document indexing, search, and RAG."""
 
+import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import httpx
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -14,7 +15,7 @@ from pydantic import BaseModel, Field
 from documind.config import Settings
 from documind.db import DocuDatabase
 from documind.extractor import ExtractionError, chunk_pages, extract_document
-from documind.rag import OllamaRAGClient, cosine_similarity, score_chunks_tfidf
+from documind.rag import OllamaRAGClient, cosine_similarity, rank_hybrid_rrf, score_chunks_tfidf
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -28,6 +29,7 @@ class SearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=1000)
     collection_id: str | None = None
     top_k: int = Field(default=5, ge=1, le=20)
+    mode: Literal["auto", "hybrid", "embedding", "tfidf"] = "auto"
 
 
 def create_app(
@@ -53,7 +55,7 @@ def create_app(
             await rag.close()
             await db.close()
 
-    app = FastAPI(title="DocuMind", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="DocuMind", version="0.3.0", lifespan=lifespan)
 
     @app.get("/", include_in_schema=False)
     async def index() -> FileResponse:
@@ -76,6 +78,7 @@ def create_app(
 
     @app.post("/api/documents", status_code=201)
     async def upload_document(
+        response: Response,
         file: Annotated[UploadFile, File()],
         collection_id: Annotated[str, Form()] = "default",
     ) -> dict[str, Any]:
@@ -86,6 +89,11 @@ def create_app(
             raise HTTPException(status_code=400, detail="Empty file")
         if len(content) > cfg.max_file_bytes:
             raise HTTPException(status_code=413, detail="File exceeds max size limit")
+        content_sha = hashlib.sha256(content).hexdigest()
+        existing = await db.find_document_by_hash(collection_id, content_sha)
+        if existing is not None:
+            response.status_code = 200
+            return {**existing, "deduplicated": True}
         try:
             doc = extract_document(file.filename or "document.txt", content)
         except ExtractionError as exc:
@@ -104,11 +112,35 @@ def create_app(
             page_count=doc.page_count,
             size_bytes=len(content),
             chunks=chunks,
+            content_sha256=content_sha,
         )
 
     @app.get("/api/documents")
     async def list_documents(collection_id: str | None = None) -> dict[str, Any]:
         return {"documents": await db.list_documents(collection_id)}
+
+    @app.get("/api/documents/{doc_id}/chunks")
+    async def get_document_chunks(doc_id: str) -> dict[str, Any]:
+        doc = await db.get_document(doc_id)
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+        chunks = await db.list_document_chunks(doc_id)
+        return {"document": doc, "chunks": chunks}
+
+    @app.post("/api/documents/{doc_id}/reindex")
+    async def reindex_document(doc_id: str) -> dict[str, Any]:
+        doc = await db.get_document(doc_id)
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+        chunks = await db.list_document_chunks(doc_id)
+        embedded_count = 0
+        for ch in chunks:
+            emb = await rag.embed(str(ch["content"]))
+            await db.update_chunk_embedding(str(ch["id"]), emb)
+            if emb is not None:
+                embedded_count += 1
+        await db.commit()
+        return {"document_id": doc_id, "chunks_total": len(chunks), "embeddings_updated": embedded_count}
 
     @app.delete("/api/documents/{doc_id}")
     async def delete_document(doc_id: str) -> dict[str, str]:
@@ -116,13 +148,23 @@ def create_app(
             raise HTTPException(status_code=404, detail="Document not found")
         return {"status": "deleted"}
 
-    async def _rank_chunks(query: str, collection_id: str | None, top_k: int) -> tuple[str, list[dict[str, Any]]]:
+    async def _rank_chunks(
+        query: str,
+        collection_id: str | None,
+        top_k: int,
+        requested_mode: str = "auto",
+    ) -> tuple[str, list[dict[str, Any]]]:
         chunks = await db.load_chunks(collection_id)
         if not chunks:
             return "tfidf", []
-        q_emb = await rag.embed(query)
+        q_emb = None if requested_mode == "tfidf" else await rag.embed(query)
         with_emb = [c for c in chunks if c["embedding"] is not None]
-        if q_emb is not None and len(with_emb) == len(chunks):
+        has_all_embs = q_emb is not None and len(with_emb) == len(chunks)
+
+        if requested_mode == "hybrid" and q_emb is not None and with_emb:
+            scored = rank_hybrid_rrf(query, chunks, q_emb)
+            mode = "hybrid"
+        elif requested_mode != "tfidf" and has_all_embs and q_emb is not None:
             scored = [
                 (cosine_similarity(q_emb, c["embedding"]), c)
                 for c in chunks
@@ -151,13 +193,13 @@ def create_app(
 
     @app.post("/api/search")
     async def search(req: SearchRequest) -> dict[str, Any]:
-        mode, results = await _rank_chunks(req.query, req.collection_id, req.top_k)
+        mode, results = await _rank_chunks(req.query, req.collection_id, req.top_k, req.mode)
         await db.record_search(req.collection_id, req.query, mode, len(results))
         return {"mode": mode, "results": results}
 
     @app.post("/api/rag")
     async def rag_answer(req: SearchRequest) -> dict[str, Any]:
-        mode, results = await _rank_chunks(req.query, req.collection_id, req.top_k)
+        mode, results = await _rank_chunks(req.query, req.collection_id, req.top_k, req.mode)
         await db.record_search(req.collection_id, req.query, f"rag:{mode}", len(results))
         answer, used_llm = await rag.generate_answer(req.query, results)
         return {

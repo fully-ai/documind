@@ -124,3 +124,62 @@ def test_ollama_embeddings_and_rag(tmp_path: Path) -> None:
             files={"file": ("malware.bin", b"\x00\x01\x02", "application/octet-stream")},
         )
         assert bad_up.status_code == 400
+
+
+def test_deduplication_chunk_inspector_reindex_rrf_and_batch_ingest(tmp_path: Path) -> None:
+    import asyncio
+
+    from documind.ingest import ingest_directory
+
+    cfg = Settings(data_dir=tmp_path / "dm3")
+    app = create_app(cfg, ollama_transport=_mock_ollama_transport(available=False))
+
+    with TestClient(app) as tc:
+        payload = b"Kubernetes etcd snapshot and restore runbook."
+        r1 = tc.post(
+            "/api/documents",
+            data={"collection_id": "default"},
+            files={"file": ("k8s.md", payload, "text/markdown")},
+        )
+        assert r1.status_code == 201
+        assert r1.json()["deduplicated"] is False
+
+        # Re-uploading identical content in same collection deduplicates cleanly
+        r2 = tc.post(
+            "/api/documents",
+            data={"collection_id": "default"},
+            files={"file": ("k8s_copy.md", payload, "text/markdown")},
+        )
+        assert r2.status_code == 200
+        assert r2.json()["deduplicated"] is True
+        assert r2.json()["id"] == r1.json()["id"]
+
+        doc_id = r1.json()["id"]
+        chunks_res = tc.get(f"/api/documents/{doc_id}/chunks")
+        assert chunks_res.status_code == 200
+        assert len(chunks_res.json()["chunks"]) >= 1
+        assert chunks_res.json()["chunks"][0]["has_embedding"] == 0
+
+    # Re-instantiate with Ollama available, reindex existing chunks, and test hybrid RRF search
+    app_online = create_app(cfg, ollama_transport=_mock_ollama_transport(available=True))
+    with TestClient(app_online) as tc2:
+        reidx = tc2.post(f"/api/documents/{doc_id}/reindex")
+        assert reidx.status_code == 200
+        assert reidx.json()["embeddings_updated"] >= 1
+
+        hyb = tc2.post("/api/search", json={"query": "etcd snapshot", "mode": "hybrid", "top_k": 3})
+        assert hyb.status_code == 200
+        assert hyb.json()["mode"] == "hybrid"
+        assert len(hyb.json()["results"]) == 1
+
+    # Batch directory ingestion CLI helper
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "guide.txt").write_text("Systemd journal rotation guide.", encoding="utf-8")
+    (corpus / "notes.md").write_text("# Postgres\nVacuum and analyze.", encoding="utf-8")
+    (corpus / "ignored.bin").write_bytes(b"\x00\x01\x02")
+    cfg_batch = Settings(data_dir=tmp_path / "dm_batch")
+    res1 = asyncio.run(ingest_directory(corpus, collection_name="ops", settings=cfg_batch))
+    assert res1 == {"indexed": 2, "deduplicated": 0, "skipped": 0}
+    res2 = asyncio.run(ingest_directory(corpus, collection_name="ops", settings=cfg_batch))
+    assert res2 == {"indexed": 0, "deduplicated": 2, "skipped": 0}

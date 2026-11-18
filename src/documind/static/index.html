@@ -5,16 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>DocuMind — Local Semantic Search &amp; RAG</title>
   <style>
-    body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; max-width: 960px; margin: 28px auto; padding: 0 16px; }
+    body { font-family: system-ui, sans-serif; background: #0d1117; color: #e6edf3; max-width: 980px; margin: 28px auto; padding: 0 16px; }
     .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
     .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
     input, select, button { padding: 8px 12px; border-radius: 6px; border: 1px solid #30363d; background: #21262d; color: #e6edf3; }
     input[type="text"] { flex: 1; min-width: 240px; }
     button { background: #2f81f7; border: none; cursor: pointer; font-weight: 600; }
     button.btn-ghost { background: #21262d; border: 1px solid #30363d; }
-    button.btn-danger { background: #da3633; padding: 4px 8px; font-size: 0.8rem; }
+    button.btn-sm { padding: 3px 8px; font-size: 0.78rem; }
+    button.btn-danger { background: #da3633; padding: 3px 8px; font-size: 0.78rem; }
     .source { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; margin-top: 8px; }
     .doc-pill { display: inline-flex; gap: 6px; align-items: center; background: #21262d; padding: 4px 8px; border-radius: 6px; margin: 4px 4px 0 0; }
+    .hidden { display: none; }
   </style>
 </head>
 <body>
@@ -26,11 +28,24 @@
       <input id="doc-file" type="file" />
       <button onclick="uploadDoc()">Index Document</button>
     </div>
+    <div id="upload-status" style="margin-top:8px;font-size:0.85rem;color:#8b949e;"></div>
     <div id="doc-list" style="margin-top: 10px; font-size: 0.9rem;"></div>
+  </div>
+  <div id="chunk-panel" class="card hidden">
+    <div class="row" style="justify-content:space-between;">
+      <strong id="chunk-title">Document Chunks</strong>
+      <button class="btn-ghost btn-sm" onclick="document.getElementById('chunk-panel').classList.add('hidden')">Close</button>
+    </div>
+    <div id="chunk-list" style="margin-top:8px;max-height:260px;overflow-y:auto;"></div>
   </div>
   <div class="card">
     <div class="row">
       <input id="query" type="text" placeholder="Ask a question or search your local documents..." />
+      <select id="mode">
+        <option value="auto" selected>Auto</option>
+        <option value="hybrid">Hybrid (RRF)</option>
+        <option value="tfidf">TF-IDF</option>
+      </select>
       <button onclick="askRAG()">Ask (RAG)</button>
       <button class="btn-ghost" onclick="searchOnly()">Search</button>
     </div>
@@ -42,6 +57,9 @@
     <ul id="history-list" style="font-size:0.88rem;color:#8b949e;padding-left:18px;"></ul>
   </div>
   <script>
+    function esc(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    }
     async function loadCollections() {
       const data = await fetch('/api/collections').then(r => r.json());
       const sel = document.getElementById('collection');
@@ -71,12 +89,24 @@
       for (const d of data.documents) {
         const span = document.createElement('span');
         span.className = 'doc-pill';
-        span.innerHTML = `${d.filename} (${d.page_count}p) <button class="btn-danger" onclick="deleteDoc('${d.id}')">×</button>`;
+        span.innerHTML = `${esc(d.filename)} (${esc(d.page_count)}p) <button class="btn-ghost btn-sm" onclick="inspectChunks('${esc(d.id)}')">Chunks</button> <button class="btn-ghost btn-sm" onclick="reindexDoc('${esc(d.id)}')">Reindex</button> <button class="btn-danger" onclick="deleteDoc('${esc(d.id)}')">×</button>`;
         box.appendChild(span);
       }
     }
+    async function inspectChunks(id) {
+      const data = await fetch(`/api/documents/${encodeURIComponent(id)}/chunks`).then(r => r.json());
+      document.getElementById('chunk-title').textContent = `Chunks: ${data.document.filename} (${data.chunks.length})`;
+      document.getElementById('chunk-list').innerHTML = data.chunks.map(c =>
+        `<div class="source"><small>#${esc(c.chunk_index)} • p.${esc(c.page_number)} • embedded=${c.has_embedding ? 'yes' : 'no'}</small><div>${esc(c.content)}</div></div>`
+      ).join('');
+      document.getElementById('chunk-panel').classList.remove('hidden');
+    }
+    async function reindexDoc(id) {
+      const res = await fetch(`/api/documents/${encodeURIComponent(id)}/reindex`, { method: 'POST' }).then(r => r.json());
+      document.getElementById('upload-status').textContent = `Reindexed ${res.chunks_total} chunks (${res.embeddings_updated} embedded).`;
+    }
     async function deleteDoc(id) {
-      await fetch(`/api/documents/${id}`, { method: 'DELETE' });
+      await fetch(`/api/documents/${encodeURIComponent(id)}`, { method: 'DELETE' });
       await loadDocs();
     }
     async function uploadDoc() {
@@ -85,15 +115,17 @@
       const form = new FormData();
       form.append('file', f);
       form.append('collection_id', document.getElementById('collection').value);
-      await fetch('/api/documents', { method: 'POST', body: form });
+      const res = await fetch('/api/documents', { method: 'POST', body: form }).then(r => r.json());
+      document.getElementById('upload-status').textContent = res.deduplicated ? `Skipped duplicate file (${res.filename})` : `Indexed ${res.filename}`;
       await loadDocs();
     }
     async function askRAG() {
       const q = document.getElementById('query').value;
       const cid = document.getElementById('collection').value;
+      const mode = document.getElementById('mode').value;
       const res = await fetch('/api/rag', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: q, collection_id: cid, top_k: 5 })
+        body: JSON.stringify({ query: q, collection_id: cid, top_k: 5, mode })
       }).then(r => r.json());
       document.getElementById('answer').textContent = res.answer;
       renderSources(res.sources);
@@ -102,9 +134,10 @@
     async function searchOnly() {
       const q = document.getElementById('query').value;
       const cid = document.getElementById('collection').value;
+      const mode = document.getElementById('mode').value;
       const res = await fetch('/api/search', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: q, collection_id: cid, top_k: 5 })
+        body: JSON.stringify({ query: q, collection_id: cid, top_k: 5, mode })
       }).then(r => r.json());
       document.getElementById('answer').textContent = `Mode: ${res.mode} (${res.results.length} matches)`;
       renderSources(res.results);
@@ -114,7 +147,7 @@
       const { history } = await fetch('/api/history').then(r => r.json());
       document.getElementById('history-list').innerHTML = (history || [])
         .slice(0, 10)
-        .map(h => `<li>[${h.mode}] ${h.query} (${h.result_count} hits)</li>`).join('');
+        .map(h => `<li>[${esc(h.mode)}] ${esc(h.query)} (${esc(h.result_count)} hits)</li>`).join('');
     }
     function renderSources(list) {
       const box = document.getElementById('sources');

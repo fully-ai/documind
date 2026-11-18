@@ -59,6 +59,45 @@ def score_chunks_tfidf(query: str, chunks: list[dict[str, Any]]) -> list[tuple[f
     return scored
 
 
+def rank_hybrid_rrf(
+    query: str,
+    chunks: list[dict[str, Any]],
+    query_embedding: list[float] | None,
+    k: int = 60,
+) -> list[tuple[float, dict[str, Any]]]:
+    """Combine dense embedding cosine rank and TF-IDF lexical rank via Reciprocal Rank Fusion."""
+    if not chunks:
+        return []
+    tfidf_ranked = score_chunks_tfidf(query, chunks)
+    emb_ranked: list[tuple[float, dict[str, Any]]] = []
+    if query_embedding is not None:
+        for ch in chunks:
+            emb = ch.get("embedding")
+            if emb is not None:
+                sim = cosine_similarity(query_embedding, emb)
+                if sim > 0.0:
+                    emb_ranked.append((sim, ch))
+        emb_ranked.sort(key=lambda item: item[0], reverse=True)
+
+    if not emb_ranked:
+        return tfidf_ranked
+
+    scores: dict[str, float] = {}
+    by_id: dict[str, dict[str, Any]] = {}
+    for rank_idx, (_, ch) in enumerate(tfidf_ranked, start=1):
+        cid = str(ch["id"])
+        by_id[cid] = ch
+        scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank_idx)
+    for rank_idx, (_, ch) in enumerate(emb_ranked, start=1):
+        cid = str(ch["id"])
+        by_id[cid] = ch
+        scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank_idx)
+
+    fused = [(score, by_id[cid]) for cid, score in scores.items()]
+    fused.sort(key=lambda item: item[0], reverse=True)
+    return fused
+
+
 class OllamaRAGClient:
     def __init__(
         self,

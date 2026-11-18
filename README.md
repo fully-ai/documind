@@ -9,7 +9,18 @@ Searching across local PDFs, runbooks, and engineering notes often requires uplo
 ## Features
 
 - **PDF & Text Extraction**: Parses `.pdf` documents via `pypdf` (preserving title, author, and page numbers) alongside `.txt`, `.md`, `.py`, `.json`, `.yaml`, `.csv`, `.rst`, and `.log` files.
-- **Hybrid Semantic & Lexical Search**: Generates dense vector embeddings via Ollama `/api/embeddings` when available and automatically falls back to deterministic TF-IDF cosine similarity when running offline.
+- **Hybrid Semantic & Lexical Search**: Generates dense vector embeddings via Ollama `/api/embeddings`, combines lexical + dense ranks with Reciprocal Rank Fusion (`mode="hybrid"`), and falls back automatically to deterministic TF-IDF cosine similarity offline.
+- **Deduplication, Re-indexing & Batch CLI**: Skips identical uploads per collection using `content_sha256`, exposes chunk inspection (`GET /api/documents/{id}/chunks`) and re-embedding (`POST /api/documents/{id}/reindex`), and includes `documind-ingest` for recursive folder indexing.
+
+## Quick Start
+
+1. **Requirements**: Python 3.11+
+2. **Clone**: `git clone https://github.com/fully-ai/documind.git && cd documind`
+3. **Install**: `./scripts/install.sh` (Windows: `.\scripts\install.ps1`)
+4. **Start**: `./scripts/dev.sh` (Windows: `.\scripts\dev.ps1`)
+5. **Open**: `http://127.0.0.1:8092`
+6. **Batch Ingest**: `.venv/bin/documind-ingest ./docs --collection runbooks`
+7. **Run Tests**: `./scripts/test.sh` (Windows: `.\scripts\test.ps1`)
 - **Grounded RAG with Citations**: Builds context-grounded prompts for Ollama `/api/chat` and returns `[Source N]` references with filename, page number, and score (plus extractive fallback when Ollama is offline).
 - **Document Collections & Search History**: Organize indexed documents into collections, delete documents cleanly with cascading chunk cleanup, and audit recent queries.
 - **Web UI & Docker Support**: Manage collections, index files, search, inspect RAG citations, and review query history from the browser interface.

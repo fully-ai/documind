@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS documents (
     mime_type TEXT NOT NULL,
     page_count INTEGER NOT NULL,
     size_bytes INTEGER NOT NULL,
+    content_sha256 TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     FOREIGN KEY (collection_id) REFERENCES collections(id) ON DELETE CASCADE
 );
@@ -73,6 +74,11 @@ class DocuDatabase:
         self._conn = await aiosqlite.connect(self.db_path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(SCHEMA_SQL)
+        # Migrate legacy databases missing content_sha256 column
+        cur = await self._conn.execute("PRAGMA table_info(documents)")
+        cols = {row[1] for row in await cur.fetchall()}
+        if "content_sha256" not in cols:
+            await self._conn.execute("ALTER TABLE documents ADD COLUMN content_sha256 TEXT NOT NULL DEFAULT ''")
         await self._conn.execute(
             "INSERT OR IGNORE INTO collections (id, name, description, created_at) VALUES (?, ?, ?, ?)",
             ("default", "default", "Default document collection", utcnow_iso()),
@@ -109,6 +115,36 @@ class DocuDatabase:
         row = await cur.fetchone()
         return dict(row) if row else None
 
+    async def find_document_by_hash(self, collection_id: str, content_sha256: str) -> dict[str, Any] | None:
+        if not content_sha256:
+            return None
+        cur = await self.conn.execute(
+            "SELECT * FROM documents WHERE collection_id = ? AND content_sha256 = ?",
+            (collection_id, content_sha256),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def get_document(self, doc_id: str) -> dict[str, Any] | None:
+        cur = await self.conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def list_document_chunks(self, doc_id: str) -> list[dict[str, Any]]:
+        cur = await self.conn.execute(
+            "SELECT id, document_id, chunk_index, page_number, content, (embedding_json IS NOT NULL) AS has_embedding "
+            "FROM chunks WHERE document_id = ? ORDER BY chunk_index ASC",
+            (doc_id,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def update_chunk_embedding(self, chunk_id: str, embedding: list[float] | None) -> None:
+        emb_json = json.dumps(embedding) if embedding is not None else None
+        await self.conn.execute("UPDATE chunks SET embedding_json = ? WHERE id = ?", (emb_json, chunk_id))
+
+    async def commit(self) -> None:
+        await self.conn.commit()
+
     async def add_document(
         self,
         collection_id: str,
@@ -119,17 +155,19 @@ class DocuDatabase:
         page_count: int,
         size_bytes: int,
         chunks: list[dict[str, Any]],
+        content_sha256: str = "",
     ) -> dict[str, Any]:
         doc_id = uuid.uuid4().hex
         now = utcnow_iso()
         await self.conn.execute(
             """
             INSERT INTO documents (
-                id, collection_id, filename, title, author, mime_type, page_count, size_bytes, created_at
+                id, collection_id, filename, title, author, mime_type,
+                page_count, size_bytes, content_sha256, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (doc_id, collection_id, filename, title, author, mime_type, page_count, size_bytes, now),
+            (doc_id, collection_id, filename, title, author, mime_type, page_count, size_bytes, content_sha256, now),
         )
         for ch in chunks:
             emb_json = json.dumps(ch["embedding"]) if ch.get("embedding") is not None else None
@@ -158,7 +196,9 @@ class DocuDatabase:
             "mime_type": mime_type,
             "page_count": page_count,
             "size_bytes": size_bytes,
+            "content_sha256": content_sha256,
             "chunk_count": len(chunks),
+            "deduplicated": False,
             "created_at": now,
         }
 

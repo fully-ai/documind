@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0] - 2026-11-18
+
+### Added
+- **SHA-256 Deduplication & Schema Migration**: Prevents duplicate document uploads inside the same collection (`deduplicated: true`) and migrates legacy databases cleanly.
+- **Chunk Inspector & Re-indexing**: Added `GET /api/documents/{id}/chunks`, `POST /api/documents/{id}/reindex`, and UI chunk inspector modal.
+- **Hybrid RRF Search & Batch CLI**: Added Reciprocal Rank Fusion (`mode="hybrid"`) combining dense embedding and TF-IDF ranks, plus `documind-ingest` recursive directory CLI and `scripts/{install,dev,test}.{sh,ps1}`.
+
 ## [0.2.0] - 2026-11-16
 
 ### Added
